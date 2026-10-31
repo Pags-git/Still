@@ -1,0 +1,15 @@
+.venv/
+venv/
+work/
+dist/
+build/
+__pycache__/
+*.py[cod]
+*.AppImage
+*.AppImage.sha256
+*.zip
+*.log
+.env
+.env.*
+!.env.example
+preview.png

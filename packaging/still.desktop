@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Still
+Comment=Frameless video player
+Exec=Still %f
+Icon=still
+Terminal=false
+StartupWMClass=Still
+StartupNotify=true
+Categories=AudioVideo;Player;Video;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;
