@@ -1,9 +1,10 @@
 """Still: a frameless PySide6 / Qt6 local video player."""
 import sys
 import json
+import hashlib
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QProcess, QLocale, QRect, QRectF, QSizeF, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QProcess, QLocale, QRect, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QRegion, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -178,6 +179,10 @@ class Player(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Still — Qt Video Player')
+        self.settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, 'Still', 'Still')
+        self.remember_position = self.settings.value('playback/remember', True, type=bool)
+        self._resume_key = None
+        self._resume_position = None
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
@@ -210,7 +215,13 @@ class Player(QWidget):
         self._startup_refresh_started = False
         self._startup_refresh_timers = []
         self._normal_geometry = None
+        self.window_resize = QPropertyAnimation(self, b'geometry', self)
+        self.window_resize.setDuration(350)
+        self.window_resize.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._ignore_video_release = False
+        self._window_drag = None
+        self._window_drag_started = False
+        self._window_drag_native = False
         self.click_timer = QTimer(self)
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.toggle_play)
@@ -286,7 +297,6 @@ class Player(QWidget):
         top_layout = QHBoxLayout(self.top)
         self.title = QLabel('STILL', self.top)
         self.title.setMouseTracking(True)
-        self.title.setToolTip('Drag here to move the window')
         self.title.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.button(top_layout, '×', 'Close', self.close)
         self.button(top_layout, '−', 'Minimize', self.showMinimized)
@@ -310,7 +320,7 @@ class Player(QWidget):
         self.time = QLabel('0:00 / 0:00', self.controls)
         row.addWidget(self.time)
         row.addStretch()
-        self.menu_button = self.button(row, '☰', 'Menu: subtitles and keyboard shortcuts', self.player_menu)
+        self.menu_button = self.button(row, '☰', 'Menu', self.player_menu)
         self.shortcuts_dialog = None
         self.mute_button = self.button(row, 'Mute', 'Mute (M)', self.toggle_mute)
         self.volume = QSlider(Qt.Orientation.Horizontal, self.controls)
@@ -393,6 +403,8 @@ class Player(QWidget):
         self.media.positionChanged.connect(self.position_changed)
         self.media.durationChanged.connect(self.duration_changed)
         self.media.seekableChanged.connect(self.seek.setEnabled)
+        self.media.seekableChanged.connect(lambda _: self.restore_playback_position())
+        self.media.mediaStatusChanged.connect(lambda _: self.restore_playback_position())
         self.media.playbackStateChanged.connect(self.playback_changed)
         self.media.errorOccurred.connect(lambda error, message: self.message(message))
         self.audio.mutedChanged.connect(lambda muted: self.mute_button.setText('Unmute' if muted else 'Mute'))
@@ -454,6 +466,10 @@ class Player(QWidget):
         if not path.is_file():
             self.message('The selected file does not exist.')
             return
+        # Only closeEvent writes history; switching files does not save it.
+        self._resume_key = hashlib.sha256(str(path).encode('utf-8')).hexdigest()
+        self._resume_position = None
+        self.window_resize.stop()
         if quiet_start:
             self._quiet_file_start = True
             self._quiet_start_cursor = QCursor.pos()
@@ -497,7 +513,8 @@ class Player(QWidget):
         self.empty.hide()
         self._waiting_for_video_frame = True
         self.title.setText(path.name)
-        self.title.setToolTip(f'{path.name} — drag to move')
+        self._resume_position = (self.settings.value(f'positions/{self._resume_key}', 0, type=int)
+                                 if self.remember_position else None)
         self.media.setSource(QUrl.fromLocalFile(str(path)))
         self.media.play()
         self.start_forced_probe(path)
@@ -550,7 +567,10 @@ class Player(QWidget):
         else:
             if self.isMaximized():
                 self.showNormal()
-            self.setGeometry(target)
+            self.window_resize.stop()
+            self.window_resize.setStartValue(self.geometry())
+            self.window_resize.setEndValue(target)
+            self.window_resize.start()
 
     def open_from_another_launch(self, filename):
         if filename:
@@ -605,10 +625,49 @@ class Player(QWidget):
         subtitles = self.create_subtitle_menu(menu)
         subtitles.setTitle('Subtitles')
         menu.addMenu(subtitles)
+        remember = menu.addAction('Remember playback position')
+        remember.setCheckable(True)
+        remember.setChecked(self.remember_position)
+        remember.toggled.connect(self.set_remember_position)
         shortcuts = menu.addAction('Keyboard shortcuts')
         shortcuts.setShortcut(QKeySequence('F1'))
         shortcuts.triggered.connect(self.show_shortcuts)
         return menu
+
+    def set_remember_position(self, enabled):
+        self.remember_position = enabled
+        if not enabled:
+            self._resume_position = None
+
+    def restore_playback_position(self):
+        if self._resume_position is None or not self.media.isSeekable():
+            return
+        if self.media.mediaStatus() not in (QMediaPlayer.MediaStatus.LoadedMedia,
+                QMediaPlayer.MediaStatus.BufferingMedia, QMediaPlayer.MediaStatus.BufferedMedia):
+            return
+        duration = self.media.duration()
+        if duration <= 0:
+            return
+        position = self._resume_position
+        self._resume_position = None
+        if 0 < position < max(0, duration - 30000):
+            self.media.setPosition(position)
+
+    def save_playback_position(self):
+        self.settings.setValue('playback/remember', self.remember_position)
+        if self.remember_position and self._resume_key is not None and self.media.duration() > 0:
+            position = self.media.position()
+            key = f'positions/{self._resume_key}'
+            if self._resume_position is not None:
+                # Closing before loading finishes must not erase existing history.
+                pass
+            elif 0 < position < max(0, self.media.duration() - 30000):
+                self.settings.setValue(key, position)
+            else:
+                self.settings.remove(key)
+        self.settings.sync()
+        if self.settings.status() != QSettings.Status.NoError:
+            print('Still could not save playback settings.', file=sys.stderr)
 
     def show_shortcuts(self):
         if self.shortcuts_dialog is None:
@@ -816,7 +875,7 @@ class Player(QWidget):
 
     def update_subtitle_button(self):
         active = self.subtitles_enabled and self.subtitle_source is not None
-        self.menu_button.setToolTip('Menu: subtitles on; keyboard shortcuts' if active else 'Menu: subtitles and keyboard shortcuts')
+        self.menu_button.setToolTip('Menu')
 
     def update_subtitles(self, position):
         text = ''
@@ -912,9 +971,15 @@ class Player(QWidget):
 
     def duration_changed(self, duration):
         self._duration = duration
+        self.restore_playback_position()
         self.position_changed(self.media.position())
 
     def toggle_fullscreen(self):
+        # Restore the intended fitted size even if fullscreen interrupts resizing.
+        if self.window_resize.state() == QPropertyAnimation.State.Running:
+            target = self.window_resize.endValue()
+            self.window_resize.stop()
+            self.setGeometry(target)
         if self.isFullScreen():
             self.exit_fullscreen()
         else:
@@ -1003,22 +1068,43 @@ class Player(QWidget):
     def eventFilter(self, obj, event):
         if isinstance(obj, QWidget) and (obj is self or self.isAncestorOf(obj)):
             kind = event.type()
+            if kind == QEvent.Type.MouseButtonPress and (obj is self.title or isinstance(obj, ResizeHandle)):
+                self.window_resize.stop()
             if kind == QEvent.Type.MouseMove:
                 self.focus_from_pointer(obj.window())
                 self.show_osd_from_pointer(event.globalPosition().toPoint())
+                if self._window_drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                    origin, window_position = self._window_drag
+                    delta = event.globalPosition().toPoint() - origin
+                    if not self._window_drag_started and delta.manhattanLength() >= QApplication.startDragDistance():
+                        self._window_drag_started = True
+                        self._ignore_video_release = True
+                        self.click_timer.stop()
+                        handle = self.windowHandle()
+                        self._window_drag_native = bool(handle and handle.startSystemMove())
+                    if self._window_drag_started:
+                        if not self._window_drag_native:
+                            self.move(window_position + delta)
+                        return True
             elif kind == QEvent.Type.MouseButtonPress and obj is self.title and event.button() == Qt.MouseButton.LeftButton:
                 if not self.isFullScreen() and self.windowHandle():
                     self.windowHandle().startSystemMove()
                     return True
             elif kind == QEvent.Type.MouseButtonDblClick and self.is_video_surface(obj) and event.button() == Qt.MouseButton.LeftButton:
+                self._window_drag = None
                 self.click_timer.stop()
                 self._ignore_video_release = True
                 self.toggle_fullscreen()
                 return True
             elif kind == QEvent.Type.MouseButtonPress and self.is_video_surface(obj) and event.button() == Qt.MouseButton.LeftButton:
+                self.window_resize.stop()
+                self._window_drag = (event.globalPosition().toPoint(), self.pos()) if not self.isFullScreen() and not self.isMaximized() else None
+                self._window_drag_started = False
+                self._window_drag_native = False
                 self._ignore_video_release = False
                 return True
             elif kind == QEvent.Type.MouseButtonRelease and self.is_video_surface(obj) and event.button() == Qt.MouseButton.LeftButton:
+                self._window_drag = None
                 if self._ignore_video_release:
                     self._ignore_video_release = False
                 elif obj is self.view.viewport() and not self.media.source().isEmpty():
@@ -1158,6 +1244,8 @@ class Player(QWidget):
                 break
 
     def closeEvent(self, event):
+        self.save_playback_position()
+        self.window_resize.stop()
         self.feedback_hold.stop()
         self.feedback_fade.stop()
         if self.shortcuts_dialog is not None:
