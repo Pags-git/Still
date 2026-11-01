@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QProcess, QLocale, QRect, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QRegion, QShortcut
+from PySide6.QtGui import QActionGroup, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QRegion, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 
 from subtitles import SubtitleTrack, embedded_text
 from single_instance import SingleInstance
+
+APP_VERSION = '0.1.4'
 
 def timestamp(ms):
     seconds = max(0, ms // 1000)
@@ -69,6 +71,18 @@ class SubtitleLabel(QLabel):
             painter.drawText(area.translated(x, y), flags, self.text())
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(area, flags, self.text())
+
+
+class VideoView(QGraphicsView):
+    """Handle file drops at the player level rather than inside the scene."""
+    def dragEnterEvent(self, event):
+        self.window().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        self.window().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        self.window().dropEvent(event)
 
 
 class SeekSlider(QSlider):
@@ -245,7 +259,8 @@ class Player(QWidget):
         self.video = QGraphicsVideoItem()
         self.video.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         self.scene.addItem(self.video)
-        self.view = QGraphicsView(self.scene, self)
+        self.view = VideoView(self.scene, self)
+        self.view.setAcceptDrops(True)
         self.view.setFrameShape(QFrame.Shape.NoFrame)
         self.view.setStyleSheet('background: #080a0e; border: none;')
         self.view.setBackgroundBrush(QColor('#080a0e'))
@@ -620,11 +635,46 @@ class Player(QWidget):
         load.triggered.connect(self.choose_subtitles)
         return menu
 
+    def create_audio_menu(self, parent):
+        menu = RoundedMenu(parent)
+        menu.setTitle('Audio track')
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        tracks = self.media.audioTracks()
+        menu.setEnabled(bool(tracks))
+        source = self.media.source()
+        labels = []
+        for metadata in tracks:
+            language = metadata.value(QMediaMetaData.Key.Language)
+            language = (QLocale.languageToString(language)
+                        if isinstance(language, QLocale.Language)
+                        and language != QLocale.Language.AnyLanguage else '')
+            title = metadata.stringValue(QMediaMetaData.Key.Title).strip()
+            labels.append(' — '.join(part for part in (language, title) if part))
+        for index, label in enumerate(labels):
+            if not label:
+                label = f'Track {index + 1}'
+            elif labels.count(label) > 1:
+                label += f' (track {index + 1})'
+            action = menu.addAction(label.replace('&', '&&'))
+            action.setCheckable(True)
+            action.setChecked(index == self.media.activeAudioTrack())
+            group.addAction(action)
+            action.triggered.connect(lambda checked=False, track=index:
+                self.select_audio_track(track, source))
+        return menu
+
+    def select_audio_track(self, index, source):
+        # A second launch may open another file while the menu is still open.
+        if source == self.media.source() and 0 <= index < len(self.media.audioTracks()):
+            self.media.setActiveAudioTrack(index)
+
     def create_player_menu(self):
         menu = RoundedMenu(self)
         subtitles = self.create_subtitle_menu(menu)
         subtitles.setTitle('Subtitles')
         menu.addMenu(subtitles)
+        menu.addMenu(self.create_audio_menu(menu))
         remember = menu.addAction('Remember playback position')
         remember.setCheckable(True)
         remember.setChecked(self.remember_position)
@@ -632,7 +682,36 @@ class Player(QWidget):
         shortcuts = menu.addAction('Keyboard shortcuts')
         shortcuts.setShortcut(QKeySequence('F1'))
         shortcuts.triggered.connect(self.show_shortcuts)
+        menu.addSeparator()
+        about = menu.addAction('About Still')
+        about.triggered.connect(self.show_about)
         return menu
+
+    def show_about(self):
+        dialog = RoundedDialog(self, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.setWindowTitle('About Still')
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(12)
+        for text, style in (
+                ('STILL', 'font-size: 24px; color: #c9e7b5;'),
+                (f'Version {APP_VERSION}', 'font-size: 14px; color: #eef1f6;'),
+                ('A minimalist video player', 'color: #89939f;'),
+                ('An App by Pags', 'color: #c9e7b5;'),
+                ('Built with OpenAI Codex', 'font-size: 11px; color: #c9e7b5;')):
+            label = QLabel(text, dialog)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet(style)
+            layout.addWidget(label)
+        close = QPushButton('Close', dialog)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignCenter)
+        dialog.setFixedWidth(340)
+        dialog.adjustSize()
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        dialog.exec()
+        dialog.deleteLater()
 
     def set_remember_position(self, enabled):
         self.remember_position = enabled
@@ -1228,6 +1307,11 @@ class Player(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
             event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
 
     def dropEvent(self, event):
         for url in event.mimeData().urls():
@@ -1281,6 +1365,7 @@ def main():
     font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     app.setFont(font)
     app.setApplicationName('Still')
+    app.setApplicationVersion(APP_VERSION)
     app.setDesktopFileName('still')
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / 'packaging' / 'still.png')))
     filename = ''
