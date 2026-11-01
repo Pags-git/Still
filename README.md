@@ -8,6 +8,21 @@ A minimalist, frameless video player built with Python, Qt6 and PySide6.
 
 ![Still welcome screen](docs/screenshot.png)
 
+## Downloads — v0.1.4
+
+Both Linux and Windows downloads are available in the [Still v0.1.4 release](https://github.com/Pags-git/Still/releases/tag/v0.1.4):
+
+- **Windows v0.1.4:** download [Still.Installer.exe](https://github.com/Pags-git/Still/releases/download/v0.1.4/Still.Installer.exe) and run the installer. No separate Python installation is needed.
+- **Linux x86_64 v0.1.4:** download [Still-x86_64.AppImage](https://github.com/Pags-git/Still/releases/download/v0.1.4/Still-x86_64.AppImage), make it executable and launch it.
+
+SHA-256 checksum files accompany both downloads. To inspect the Windows installer hash in PowerShell:
+
+```powershell
+Get-FileHash ".\Still.Installer.exe" -Algorithm SHA256
+```
+
+Compare the result with `Still.Installer.exe.sha256` from the same release. **☰ → About Still** displays the app version.
+
 ## Features
 
 - Video-first window with no native title bar or menu bar.
@@ -40,7 +55,7 @@ Open a local file directly:
 python player.py "/path/to/video.mkv"
 ```
 
-On Windows, use `py -m venv .venv`, activate with `.venv\Scripts\activate`, and run with `python`. Windows packaging and desktop behavior have not been validated.
+On Windows, use `py -m venv .venv`, activate with `.venv\Scripts\activate`, and run with `python`. A packaged Windows v0.1.4 installer is also available above.
 
 Opening Still without a file shows its welcome screen. Opening a file directly skips that screen and starts with controls hidden until pointer movement or re-entry. Close previous versions completely before trying an updated build.
 
@@ -102,7 +117,7 @@ The builder downloads the official `appimagetool` and checks its checksum. Its c
 
 Playback is provided by Qt Multimedia/FFmpeg. MKV and MP4 playback, H.264/H.265 content, embedded text subtitles and external SRT/VTT have been exercised during development. Other containers/codecs depend on the bundled backend; a filename extension alone does not guarantee playback. DRM-protected content is not supported.
 
-Development checks covered subtitle parsing, forced flags, seek previews, OSD/notification timing, fullscreen restoration, resize geometry, single-instance handoff and crash recovery, plus standalone Linux startup. Hardware acceleration, unusual codecs, other distributions and Windows need further testing.
+Development checks covered subtitle parsing, forced flags, seek previews, OSD/notification timing, fullscreen restoration, resize geometry, single-instance handoff and crash recovery, plus standalone Linux startup. Windows v0.1.4 is distributed as an installer supplied by Pags; its uploaded SHA-256 hash was verified, but this installer was not executed on Windows during publication. Pags previously reported successful manual testing of the earlier Windows build. Hardware acceleration, unusual codecs and broader platform coverage need further testing.
 
 ## Project files
 
