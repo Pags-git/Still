@@ -3,7 +3,7 @@ import sys
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QProcess, QLocale, QRectF, QSizeF, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QProcess, QLocale, QRect, QRectF, QSizeF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QRegion, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -193,6 +193,7 @@ class Player(QWidget):
         self._quiet_start_cursor = None
         self._quiet_pointer_left = False
         self._waiting_for_video_frame = False
+        self._fit_video_on_load = False
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.resize(1100, 680)
         self.setMinimumSize(520, 320)
@@ -489,6 +490,7 @@ class Player(QWidget):
         self.notice.hide()
         self._waiting_for_video_frame = False
         self.media.stop()
+        self._fit_video_on_load = True
         self.loading_cover.setGeometry(self.rect())
         self.loading_cover.show()
         self.loading_cover.raise_()
@@ -507,11 +509,48 @@ class Player(QWidget):
 
     def present_video_frame(self, frame):
         self.video.videoSink().setVideoFrame(frame)
+        if self._fit_video_on_load and frame.isValid():
+            self.fit_window_to_video()
         if self._waiting_for_video_frame and frame.isValid():
             # Paint the decoded frame underneath before uncovering the viewport.
             self.view.viewport().repaint()
             self._waiting_for_video_frame = False
             self.loading_cover.hide()
+
+    def fit_window_to_video(self):
+        # Qt's native size accounts for the video's display proportions, rather
+        # than assuming the encoded pixels are square. Fit once per file so
+        # subsequent frames do not undo the user's manual window resizing.
+        native = self.video.nativeSize()
+        if native.width() <= 0 or native.height() <= 0:
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        previous = (self._normal_geometry if self.isFullScreen()
+                    and self._normal_geometry else self.normalGeometry()
+                    if self.isMaximized() else self.geometry())
+        ratio = native.width() / native.height()
+        width = max(previous.width(), 520, 320 * ratio)
+        height = width / ratio
+        scale = min(1.0, available.width() / width, available.height() / height)
+        size = QSizeF(width * scale, height * scale).toSize()
+        target = QRect(previous)
+        target.setSize(size)
+        target.moveCenter(previous.center())
+        target.moveLeft(max(available.left(), min(target.left(), available.right() - size.width() + 1)))
+        target.moveTop(max(available.top(), min(target.top(), available.bottom() - size.height() + 1)))
+        # Unusual portrait/widescreen files may need a smaller minimum in one
+        # dimension to fit the display without introducing letterboxing.
+        self.setMinimumSize(min(520, size.width()), min(320, size.height()))
+        self._fit_video_on_load = False
+        if self.isFullScreen():
+            self._normal_geometry = target
+        else:
+            if self.isMaximized():
+                self.showNormal()
+            self.setGeometry(target)
 
     def open_from_another_launch(self, filename):
         if filename:
